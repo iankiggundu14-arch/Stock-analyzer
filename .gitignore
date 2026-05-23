@@ -1,5 +1,6 @@
-# Generated cache data
-cache/
+# Generated cache data (keep screener snapshot for Vercel cold-start seeding)
+cache/status.json
+cache/prices_live.json
 
 # Python
 __pycache__/

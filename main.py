@@ -3,6 +3,7 @@ AlphaScout — Small & Mid-Cap Outperformer Screener
 Backend: FastAPI + yfinance + SEC EDGAR + FRED
 """
 import json
+import os
 import time
 import threading
 from datetime import datetime
@@ -18,15 +19,26 @@ from fastapi.responses import JSONResponse
 import uvicorn
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-BASE   = Path(__file__).parent
-CACHE  = BASE / "cache"
-FRONT  = BASE / "frontend"
-CACHE.mkdir(exist_ok=True)
+BASE  = Path(__file__).parent
+FRONT = BASE / "frontend"
 FRONT.mkdir(exist_ok=True)
 
-CACHE_FILE  = CACHE / "screener.json"
-STATUS_FILE = CACHE / "status.json"
-PRICES_FILE = CACHE / "prices_live.json"
+# Vercel is read-only except /tmp; bootstrap screener from committed cache snapshot
+if os.environ.get("VERCEL"):
+    CACHE       = Path("/tmp")
+    CACHE_FILE  = Path("/tmp/screener.json")
+    STATUS_FILE = Path("/tmp/status.json")
+    PRICES_FILE = Path("/tmp/prices_live.json")
+    _snap = BASE / "cache" / "screener.json"
+    if _snap.exists() and not CACHE_FILE.exists():
+        import shutil
+        shutil.copy(_snap, CACHE_FILE)
+else:
+    CACHE       = BASE / "cache"
+    CACHE_FILE  = CACHE / "screener.json"
+    STATUS_FILE = CACHE / "status.json"
+    PRICES_FILE = CACHE / "prices_live.json"
+    CACHE.mkdir(exist_ok=True)
 
 # ── Market-cap tiers (USD) ────────────────────────────────────────────────────
 TIER_THRESHOLDS = [

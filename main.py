@@ -6,7 +6,7 @@ import json
 import os
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -106,10 +106,13 @@ def compute():
         wiki["symbol"] = wiki["symbol"].str.replace(".", "-", regex=False)
         tickers = wiki["symbol"].tolist()
 
-        # ── Step 2: Batch price download (6 months, daily) ───────────────────
-        set_status("running", f"Downloading 6-month price history for {len(tickers)} stocks…", 15)
+        # ── Step 2: Batch price download (7 months via date range to guarantee
+        #            ≥126 trading days for the 6-month return calculation) ───────
+        set_status("running", f"Downloading price history for {len(tickers)} stocks…", 15)
+        _end   = datetime.now()
+        _start = (_end - timedelta(days=215)).strftime("%Y-%m-%d")
         raw = yf.download(
-            tickers, period="6mo", interval="1d",
+            tickers, start=_start, end=_end.strftime("%Y-%m-%d"), interval="1d",
             auto_adjust=True, progress=False, threads=True,
         )
 
@@ -145,7 +148,7 @@ def compute():
             price = float(s.iloc[-1])
 
             def ret(n: int):
-                if len(s) <= n:
+                if len(s) < n:
                     return None
                 return round((price / float(s.iloc[-n]) - 1) * 100, 2)
 
@@ -395,6 +398,63 @@ def api_chart(ticker: str, period: str = Query("3mo")):
         return {"ticker": ticker, "period": period, "data": rows}
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, 500)
+
+
+@app.get("/api/insight/{ticker}")
+def api_insight(ticker: str):
+    """Claude AI analysis for a single stock."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return JSONResponse({"error": "ANTHROPIC_API_KEY not configured on this server."}, 503)
+
+    if not CACHE_FILE.exists():
+        return JSONResponse({"error": "No screener data — run /api/refresh first."}, 503)
+
+    d = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+    stock = next((s for s in d["stocks"] if s["ticker"] == ticker.upper()), None)
+    if not stock:
+        return JSONResponse({"error": f"Ticker {ticker.upper()} not found in screener data."}, 404)
+
+    try:
+        import anthropic
+    except ImportError:
+        return JSONResponse({"error": "anthropic package not installed."}, 503)
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    r1m  = f"{stock['r1m']:+.1f}%" if stock.get("r1m") is not None else "N/A"
+    r3m  = f"{stock['r3m']:+.1f}%" if stock.get("r3m") is not None else "N/A"
+    r6m  = f"{stock['r6m']:+.1f}%" if stock.get("r6m") is not None else "N/A"
+    rs3m = f"{stock['rs3m']:+.1f}%" if stock.get("rs3m") is not None else "N/A"
+    rs1m = f"{stock['rs1m']:+.1f}%" if stock.get("rs1m") is not None else "N/A"
+    score = f"{stock['score']:.1f}" if stock.get("score") is not None else "N/A"
+    pct   = f"{stock['pct']:.0f}th percentile" if stock.get("pct") is not None else "N/A"
+
+    prompt = (
+        f"Analyze this S&P 500 stock for an equity research context:\n\n"
+        f"Ticker: {stock['ticker']} — {stock['name']}\n"
+        f"Sector: {stock['sector']} | Sub-Industry: {stock['sub']}\n"
+        f"Market Cap: {stock['mc_fmt']} ({stock['tier']} tier within S&P 500)\n\n"
+        f"Returns:  1M {r1m}  |  3M {r3m}  |  6M {r6m}\n"
+        f"Relative Strength vs sector large-caps:  RS(1M) {rs1m}  |  RS(3M) {rs3m}\n"
+        f"Composite outperformance score: {score}  |  Rank: {pct} among small/mid universe\n\n"
+        f"In exactly 3 sentences: (1) what the momentum data says about this stock right now, "
+        f"(2) a likely fundamental reason a smaller S&P 500 member in {stock['sector']} "
+        f"might outperform its larger peers, (3) the single biggest risk to this trend. "
+        f"Be data-driven and concise. Do not give buy/sell recommendations."
+    )
+
+    msg = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=350,
+        system=(
+            "You are a quantitative equity analyst assistant. "
+            "Provide brief, factual analysis based solely on the data given. "
+            "Never speculate beyond what the numbers support."
+        ),
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return {"ticker": ticker.upper(), "insight": msg.content[0].text}
 
 
 # Serve the frontend (must come last — catches all unmatched routes)

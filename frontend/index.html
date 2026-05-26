@@ -219,6 +219,21 @@
     .info-lbl  { font-size:10px; color:var(--txt-mute); }
     .info-val  { font-family:var(--mono); font-size:13px; font-weight:600; }
 
+    /* ── AI Insight ── */
+    .insight-box { margin:14px 20px 0; border:1px solid var(--border);
+      border-radius:8px; overflow:hidden; flex-shrink:0; }
+    .insight-btn { width:100%; padding:9px 14px; background:rgba(74,158,255,.08);
+      border:none; color:var(--blue); font-size:12px; font-weight:600;
+      cursor:pointer; text-align:left; display:flex; align-items:center;
+      gap:7px; transition:background .15s; font-family:var(--sans); }
+    .insight-btn:hover { background:rgba(74,158,255,.16); }
+    .insight-btn:disabled { opacity:.5; cursor:not-allowed; }
+    .insight-text { padding:12px 14px; font-size:12px; line-height:1.6;
+      color:var(--txt-dim); border-top:1px solid var(--border);
+      white-space:pre-wrap; display:none; }
+    .insight-text.visible { display:block; }
+    .insight-error { color:var(--red); }
+
     /* ── Empty / scroll ── */
     .empty { padding:55px 24px; text-align:center; color:var(--txt-dim); }
     .empty h3 { font-size:16px; margin-bottom:6px; }
@@ -281,6 +296,13 @@
 
   <div class="panel-stats" id="pStats"></div>
 
+  <div class="insight-box" id="insightBox">
+    <button class="insight-btn" id="insightBtn" onclick="loadInsight()">
+      <span>✦</span> Ask Claude — AI Analysis
+    </button>
+    <div class="insight-text" id="insightText"></div>
+  </div>
+
   <div class="panel-scroll">
     <div class="panel-section-title">Details</div>
     <div class="info-grid" id="pDetails"></div>
@@ -342,7 +364,8 @@
       <div class="tabs">
         <button class="tab on"  onclick="setTier('all',this)">All</button>
         <button class="tab"     onclick="setTier('small',this)">Small</button>
-        <button class="tab"     onclick="setTier('mega',this)">Large</button>
+        <button class="tab"     onclick="setTier('large',this)">Large</button>
+        <button class="tab"     onclick="setTier('mega',this)">Mega</button>
       </div>
       <div class="fdiv"></div>
       <span class="flbl">Sector</span>
@@ -667,7 +690,8 @@ function openPanel(ticker) {
   document.getElementById('detailPanel').classList.add('open');
   document.getElementById('backdrop').classList.add('open');
 
-  // Reset period buttons and load chart
+  // Reset AI insight and period buttons, then load chart
+  resetInsight();
   document.querySelectorAll('.per-btn').forEach(b => {
     b.classList.toggle('on', b.textContent === '3M');
   });
@@ -890,6 +914,36 @@ function abbrev(sec){
     'Industrials':'Industrials','Financials':'Financials',
     'Materials':'Materials','Energy':'Energy','Utilities':'Utilities'};
   return m[sec]||sec.split(' ').slice(0,2).join(' ');
+}
+
+// ── Claude AI Insight ──────────────────────────────────────────────────────
+async function loadInsight() {
+  if (!activeTicker) return;
+  const btn  = document.getElementById('insightBtn');
+  const box  = document.getElementById('insightText');
+  btn.disabled = true;
+  btn.innerHTML = '<span>✦</span> Asking Claude…';
+  box.className = 'insight-text visible';
+  box.textContent = 'Analyzing ' + activeTicker + '…';
+
+  const d = await apiGet('/api/insight/' + activeTicker);
+  btn.disabled = false;
+  btn.innerHTML = '<span>✦</span> Ask Claude — AI Analysis';
+
+  if (d.insight) {
+    box.textContent = d.insight;
+    box.classList.remove('insight-error');
+  } else {
+    box.textContent = d.error || 'Analysis unavailable.';
+    box.classList.add('insight-error');
+  }
+}
+
+function resetInsight() {
+  const btn = document.getElementById('insightBtn');
+  const box = document.getElementById('insightText');
+  if (btn) { btn.disabled = false; btn.innerHTML = '<span>✦</span> Ask Claude — AI Analysis'; }
+  if (box) { box.className = 'insight-text'; box.textContent = ''; }
 }
 
 init();

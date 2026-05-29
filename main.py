@@ -40,6 +40,8 @@ else:
     PRICES_FILE = CACHE / "prices_live.json"
     CACHE.mkdir(exist_ok=True)
 
+IS_VERCEL = bool(os.environ.get("VERCEL"))
+
 # ── Market-cap tiers (USD) ────────────────────────────────────────────────────
 TIER_THRESHOLDS = [
     ("mega",  200_000_000_000),
@@ -315,16 +317,27 @@ VALID_SORTS = {"score", "rs3m", "rs1m", "r3m", "r1m", "r6m", "mc", "price"}
 
 @app.get("/api/status")
 def api_status():
-    if STATUS_FILE.exists():
-        return json.loads(STATUS_FILE.read_text(encoding="utf-8"))
+    # If we have cached data, report ready unless a compute() is actively running.
+    # A stale "error" in STATUS_FILE must not hide valid cache — it just means the
+    # last *refresh attempt* failed, not that the existing data is unusable.
     if CACHE_FILE.exists():
+        if STATUS_FILE.exists():
+            st = json.loads(STATUS_FILE.read_text(encoding="utf-8"))
+            if st.get("status") == "running":
+                return st
         d = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
         return {"status": "ready", "ts": d["updated_at"], "n": d["n"], "progress": 100}
+    if STATUS_FILE.exists():
+        return json.loads(STATUS_FILE.read_text(encoding="utf-8"))
     return {"status": "no_data", "message": "No data yet", "progress": 0}
 
 
 @app.post("/api/refresh")
 def api_refresh():
+    if IS_VERCEL:
+        # Vercel serverless kills background threads after the response is sent,
+        # so compute() can never complete there. Serve the committed snapshot instead.
+        return {"ok": True, "static": True, "message": "Serving committed snapshot — live refresh is disabled on Vercel"}
     threading.Thread(target=compute, daemon=True).start()
     return {"ok": True}
 
@@ -364,8 +377,20 @@ def api_screener(
 @app.get("/api/prices/live")
 def api_live_prices():
     """Latest price + daily change% for every tracked stock."""
+    if IS_VERCEL:
+        # On Vercel, background threads are killed after the response is sent, so
+        # refresh_live_prices() can never finish — every call would spawn a new
+        # Yahoo Finance download that gets aborted, burning rate-limit quota.
+        # Instead, serve static prices from the committed screener snapshot.
+        if CACHE_FILE.exists():
+            try:
+                d = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+                prices = {s["ticker"]: {"price": s["price"], "chg": None} for s in d["stocks"]}
+                return {"prices": prices, "updated_at": d["updated_at"]}
+            except Exception:
+                return {"prices": {}, "updated_at": None}
+        return {"prices": {}, "updated_at": None}
     if not PRICES_FILE.exists():
-        # Kick off an async refresh; return empty for now
         threading.Thread(target=refresh_live_prices, daemon=True).start()
         return {"prices": {}, "updated_at": None, "refreshing": True}
     return json.loads(PRICES_FILE.read_text(encoding="utf-8"))
@@ -378,6 +403,30 @@ def api_chart(ticker: str, period: str = Query("3mo")):
     if period not in valid:
         period = "3mo"
     ticker = ticker.upper()
+
+    if IS_VERCEL:
+        # Avoid live Yahoo Finance calls on Vercel — use the 30-day spark data
+        # baked into the screener snapshot so the chart always loads.
+        if CACHE_FILE.exists():
+            try:
+                d = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+                stock = next((s for s in d["stocks"] if s["ticker"] == ticker), None)
+                if stock and stock.get("spark"):
+                    spark = stock["spark"]
+                    price = stock["price"]
+                    # spark is normalised to 100 at the start of the 30-day window
+                    base = price / (spark[-1] / 100) if spark[-1] else price
+                    today = datetime.now()
+                    rows = []
+                    for i, v in enumerate(spark):
+                        day = today - timedelta(days=len(spark) - 1 - i)
+                        c = round(base * v / 100, 2)
+                        rows.append({"t": day.strftime("%Y-%m-%d"), "o": c, "h": c, "l": c, "c": c, "v": 0})
+                    return {"ticker": ticker, "period": period, "data": rows}
+            except Exception:
+                pass
+        return JSONResponse({"error": f"No chart data for {ticker}"}, 404)
+
     try:
         hist = yf.Ticker(ticker).history(period=period, interval="1d", auto_adjust=True)
         if hist.empty:
